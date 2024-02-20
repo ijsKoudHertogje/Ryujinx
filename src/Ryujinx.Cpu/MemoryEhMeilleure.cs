@@ -15,7 +15,7 @@ namespace Ryujinx.Cpu
         private readonly ulong _baseAddress;
         private readonly ulong _mirrorAddress;
 
-        public MemoryEhMeilleure(MemoryBlock addressSpace, MemoryBlock addressSpaceMirror, MemoryTracking tracking, TrackingEventDelegate trackingEvent = null)
+        public MemoryEhMeilleure(MemoryBlock addressSpace, MemoryBlock addressSpaceMirror, MemoryTracking tracking, TrackingEventDelegate trackingEvent = null, long pcOffset = 0L)
         {
             _baseAddress = (ulong)addressSpace.Pointer;
 
@@ -23,7 +23,7 @@ namespace Ryujinx.Cpu
 
             _trackingEvent = trackingEvent ?? tracking.VirtualMemoryEvent;
 
-            bool added = NativeSignalHandler.AddTrackedRegion((nuint)_baseAddress, (nuint)endAddress, Marshal.GetFunctionPointerForDelegate(_trackingEvent));
+            bool added = NativeSignalHandler.AddTrackedRegion((nuint)_baseAddress, (nuint)endAddress, Marshal.GetFunctionPointerForDelegate(_trackingEvent), pcOffset);
 
             if (!added)
             {

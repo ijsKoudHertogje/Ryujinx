@@ -16,6 +16,7 @@ namespace ARMeilleure.Signal
         public nuint RangeAddress;
         public nuint RangeEndAddress;
         public IntPtr ActionPointer;
+        public long PcOffset;
     }
 
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -150,7 +151,7 @@ namespace ARMeilleure.Signal
             return ref Unsafe.AsRef<SignalHandlerConfig>((void*)_handlerConfig);
         }
 
-        public static unsafe bool AddTrackedRegion(nuint address, nuint endAddress, IntPtr action)
+        public static unsafe bool AddTrackedRegion(nuint address, nuint endAddress, IntPtr action, long pcOffset = 0L)
         {
             var ranges = &((SignalHandlerConfig*)_handlerConfig)->Range0;
 
@@ -161,6 +162,7 @@ namespace ARMeilleure.Signal
                     ranges[i].RangeAddress = address;
                     ranges[i].RangeEndAddress = endAddress;
                     ranges[i].ActionPointer = action;
+                    ranges[i].PcOffset = pcOffset;
                     ranges[i].IsActive = 1;
 
                     return true;
@@ -229,6 +231,8 @@ namespace ARMeilleure.Signal
                 context.BranchIfFalse(skipActionLabel, trackingActionPtr);
                 Operand result = context.Call(trackingActionPtr, OperandType.I32, offset, Const(_pageSize), isWrite);
                 context.Copy(inRegionLocal, result);
+
+                GeneratePcPatchCode(context, signalStructPtr, rangeBaseOffset);
 
                 context.MarkLabel(skipActionLabel);
 
@@ -422,6 +426,37 @@ namespace ARMeilleure.Signal
             OperandType[] argTypes = new OperandType[] { OperandType.I64 };
 
             return Compiler.Compile(cfg, argTypes, OperandType.I32, CompilerOptions.HighCq, RuntimeInformation.ProcessArchitecture).Map<VectoredExceptionHandler>();
+        }
+
+        private static void GeneratePcPatchCode(EmitterContext context, IntPtr signalStructPtr, ulong rangeBaseOffset)
+        {
+            if (RuntimeInformation.ProcessArchitecture == Architecture.Arm64)
+            {
+                if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+                {
+                    Operand ucontextPtr = context.LoadArgument(OperandType.I64, 2);
+                    Operand pcOffset = context.Load(OperandType.I64, Const((ulong)signalStructPtr + rangeBaseOffset + 28));
+
+                    Operand lblSkip = Label();
+                    context.BranchIfFalse(lblSkip, pcOffset);
+
+                    if (OperatingSystem.IsLinux())
+                    {
+                        Operand pcAddress = context.Add(ucontextPtr, Const(0x1B8UL));
+                        Operand pc = context.Load(OperandType.I64, pcAddress);
+                        context.Store(pcAddress, context.Add(pc, pcOffset));
+                    }
+                    else if (OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+                    {
+                        ucontextPtr = context.Load(OperandType.I64, context.Add(ucontextPtr, Const(0x30UL)));
+                        Operand pcAddress = context.Add(ucontextPtr, Const(0x110UL));
+                        Operand pc = context.Load(OperandType.I64, pcAddress);
+                        context.Store(pcAddress, context.Add(pc, pcOffset));
+                    }
+
+                    context.MarkLabel(lblSkip);
+                }
+            }
         }
     }
 }

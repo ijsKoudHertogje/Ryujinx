@@ -121,13 +121,13 @@ namespace Ryujinx.Cpu.Jit
                 return left;
             }
 
-            public void Map(AddressSpacePartitionAllocation baseBlock, ulong baseAddress, PrivateMemoryAllocation newAllocation)
+            public void Map(AddressSpacePartitionMultiAllocation baseBlock, ulong baseAddress, PrivateMemoryAllocation newAllocation)
             {
                 baseBlock.MapView(newAllocation.Memory, newAllocation.Offset, Address - baseAddress, Size);
                 PrivateAllocation = newAllocation;
             }
 
-            public void Unmap(AddressSpacePartitionAllocation baseBlock, ulong baseAddress)
+            public void Unmap(AddressSpacePartitionMultiAllocation baseBlock, ulong baseAddress)
             {
                 if (PrivateAllocation.IsValid)
                 {
@@ -161,11 +161,10 @@ namespace Ryujinx.Cpu.Jit
         }
 
         private readonly MemoryBlock _backingMemory;
-        private readonly AddressSpacePartitionAllocation _baseMemory;
+        private readonly AddressSpacePartitionMultiAllocation _baseMemory;
         private readonly PrivateMemoryAllocator _privateMemoryAllocator;
         private readonly IntrusiveRedBlackTree<Mapping> _mappingTree;
         private readonly IntrusiveRedBlackTree<PrivateMapping> _privateTree;
-        private readonly AddressSpacePageProtections _pageProtections;
 
         private readonly ReaderWriterLockSlim _treeLock;
 
@@ -175,6 +174,8 @@ namespace Ryujinx.Cpu.Jit
         private ulong? _lastPagePa;
         private ulong _cachedFirstPagePa;
         private ulong _cachedLastPagePa;
+        private MemoryBlock _firstPageMemoryForUnmap;
+        private MemoryBlock _lastPageMemoryForUnmap;
         private bool _hasBridgeAtEnd;
         private MemoryPermission _lastPageProtection;
 
@@ -182,12 +183,16 @@ namespace Ryujinx.Cpu.Jit
         public ulong Size { get; }
         public ulong EndAddress => Address + Size;
 
-        public AddressSpacePartition(AddressSpacePartitionAllocation baseMemory, MemoryBlock backingMemory, ulong address, ulong size)
+        public AddressSpacePartition(
+            AddressSpacePartitionAllocation baseMemory,
+            AddressSpacePartitionAllocation baseMemoryRo,
+            MemoryBlock backingMemory,
+            ulong address,
+            ulong size)
         {
             _privateMemoryAllocator = new PrivateMemoryAllocator(DefaultBlockAlignment, MemoryAllocationFlags.Mirrorable);
             _mappingTree = new IntrusiveRedBlackTree<Mapping>();
             _privateTree = new IntrusiveRedBlackTree<PrivateMapping>();
-            _pageProtections = new AddressSpacePageProtections();
             _treeLock = new ReaderWriterLockSlim();
 
             _mappingTree.Add(new Mapping(address, size, MappingType.None));
@@ -196,7 +201,7 @@ namespace Ryujinx.Cpu.Jit
             _hostPageSize = MemoryBlock.GetPageSize();
 
             _backingMemory = backingMemory;
-            _baseMemory = baseMemory;
+            _baseMemory = new(baseMemory, baseMemoryRo);
 
             _cachedFirstPagePa = ulong.MaxValue;
             _cachedLastPagePa = ulong.MaxValue;
@@ -238,8 +243,6 @@ namespace Ryujinx.Cpu.Jit
             }
 
             Update(va, pa, size, MappingType.Private);
-
-            _pageProtections.UpdateMappings(this, va, size);
         }
 
         public void Unmap(ulong va, ulong size)
@@ -258,8 +261,6 @@ namespace Ryujinx.Cpu.Jit
             }
 
             Update(va, 0UL, size, MappingType.None);
-
-            _pageProtections.Remove(va, size);
         }
 
         public void ReprotectAligned(ulong va, ulong size, MemoryPermission protection)
@@ -269,7 +270,7 @@ namespace Ryujinx.Cpu.Jit
 
             _baseMemory.Reprotect(va - Address, size, protection, false);
 
-            if (va == EndAddress - _hostPageSize)
+            if (va + size > EndAddress - _hostPageSize)
             {
                 // Protections at the last page also applies to the bridge, if we have one.
                 // (This is because last page access is always done on the bridge, not on our base mapping,
@@ -277,7 +278,7 @@ namespace Ryujinx.Cpu.Jit
 
                 if (_hasBridgeAtEnd)
                 {
-                    _baseMemory.Reprotect(Size, size, protection, false);
+                    _baseMemory.Reprotect(Size, _hostPageSize, protection, false);
                 }
 
                 _lastPageProtection = protection;
@@ -288,13 +289,28 @@ namespace Ryujinx.Cpu.Jit
             ulong va,
             ulong size,
             MemoryPermission protection,
-            AddressSpacePartitionAllocator asAllocator,
             AddressSpacePartitioned addressSpace,
             Action<ulong, IntPtr, ulong> updatePtCallback)
         {
-            ulong endVa = va + size;
+            _baseMemory.LazyInitMirrorForProtection(addressSpace, Address, Size, protection);
 
-            _pageProtections.Reprotect(asAllocator, addressSpace, this, va, endVa, protection, updatePtCallback);
+            updatePtCallback(va, _baseMemory.GetPointerForProtection(va - Address, size, protection), size);
+
+            if (va + size > EndAddress - 0x1000)
+            {
+                // Protections at the last page also applies to the bridge, if we have one.
+                // (This is because last page access is always done on the bridge, not on our base mapping,
+                // for the cases where access crosses a page boundary and reaches the non-contiguous next mapping).
+
+                if (_hasBridgeAtEnd)
+                {
+                    IntPtr ptPtr = _baseMemory.GetPointerForProtection(Size, _hostPageSize, protection);
+
+                    updatePtCallback(EndAddress - 0x1000, ptPtr + ((IntPtr)_hostPageSize - 0x1000), 0x1000);
+                }
+
+                _lastPageProtection = protection;
+            }
         }
 
         public IntPtr GetPointer(ulong va, ulong size)
@@ -312,8 +328,8 @@ namespace Ryujinx.Cpu.Jit
 
         public void InsertBridgeAtEnd(AddressSpacePartition partitionAfter, Action<ulong, IntPtr, ulong> updatePtCallback)
         {
-            ulong firstPagePa = partitionAfter._firstPagePa.HasValue ? partitionAfter._firstPagePa.Value : ulong.MaxValue;
-            ulong lastPagePa = _lastPagePa.HasValue ? _lastPagePa.Value : ulong.MaxValue;
+            ulong firstPagePa = partitionAfter._firstPagePa ?? ulong.MaxValue;
+            ulong lastPagePa = _lastPagePa ?? ulong.MaxValue;
 
             if (firstPagePa != _cachedFirstPagePa || lastPagePa != _cachedLastPagePa)
             {
@@ -325,26 +341,49 @@ namespace Ryujinx.Cpu.Jit
                     _baseMemory.MapView(lastPageMemory, lastPageOffset, Size, _hostPageSize);
                     _baseMemory.MapView(firstPageMemory, firstPageOffset, Size + _hostPageSize, _hostPageSize);
 
-                    _baseMemory.Reprotect(Size, _hostPageSize, _lastPageProtection, false);
+                    IntPtr ptPtr;
 
-                    updatePtCallback(EndAddress - _hostPageSize, _baseMemory.GetPointer(Size, _hostPageSize), _hostPageSize);
+                    if (AddressSpacePartitioned.Use4KBProtection)
+                    {
+                        ptPtr = _baseMemory.GetPointerForProtection(Size, _hostPageSize, _lastPageProtection);
+                    }
+                    else
+                    {
+                        _baseMemory.Reprotect(Size, _hostPageSize, _lastPageProtection, false);
 
+                        ptPtr = _baseMemory.GetPointer(Size, _hostPageSize);;
+                    }
+
+                    updatePtCallback(EndAddress - 0x1000, ptPtr + ((IntPtr)_hostPageSize - 0x1000), 0x1000);
+
+                    _firstPageMemoryForUnmap = firstPageMemory;
+                    _lastPageMemoryForUnmap = lastPageMemory;
                     _hasBridgeAtEnd = true;
-
-                    _pageProtections.UpdateMappings(partitionAfter, EndAddress, GuestPageSize);
                 }
                 else
                 {
-                    if (_lastPagePa.HasValue)
-                    {
-                        (MemoryBlock lastPageMemory, ulong lastPageOffset) = GetLastPageMemoryAndOffset();
+                    IntPtr ptPtr = AddressSpacePartitioned.Use4KBProtection
+                        ? _baseMemory.GetPointerForProtection(Size - _hostPageSize, _hostPageSize, _lastPageProtection)
+                        : _baseMemory.GetPointer(Size - _hostPageSize, _hostPageSize);
 
-                        updatePtCallback(EndAddress - _hostPageSize, lastPageMemory.GetPointer(lastPageOffset, _hostPageSize), _hostPageSize);
+                    updatePtCallback(EndAddress - 0x1000, ptPtr + ((IntPtr)_hostPageSize - 0x1000), 0x1000);
+
+                    MemoryBlock firstPageMemoryForUnmap = _firstPageMemoryForUnmap;
+                    MemoryBlock lastPageMemoryForUnmap = _lastPageMemoryForUnmap;
+
+                    if (firstPageMemoryForUnmap != null)
+                    {
+                        _baseMemory.UnmapView(firstPageMemoryForUnmap, Size + _hostPageSize, _hostPageSize);
+                        _firstPageMemoryForUnmap = null;
+                    }
+
+                    if (lastPageMemoryForUnmap != null)
+                    {
+                        _baseMemory.UnmapView(lastPageMemoryForUnmap, Size, _hostPageSize);
+                        _lastPageMemoryForUnmap = null;
                     }
 
                     _hasBridgeAtEnd = false;
-
-                    _pageProtections.Remove(EndAddress, GuestPageSize);
                 }
 
                 _cachedFirstPagePa = firstPagePa;
@@ -354,19 +393,31 @@ namespace Ryujinx.Cpu.Jit
 
         public void RemoveBridgeFromEnd(Action<ulong, IntPtr, ulong> updatePtCallback)
         {
-            if (_lastPagePa.HasValue)
-            {
-                (MemoryBlock lastPageMemory, ulong lastPageOffset) = GetLastPageMemoryAndOffset();
+            IntPtr ptPtr = AddressSpacePartitioned.Use4KBProtection
+                ? _baseMemory.GetPointerForProtection(Size - _hostPageSize, _hostPageSize, _lastPageProtection)
+                : _baseMemory.GetPointer(Size - _hostPageSize, _hostPageSize);
 
-                updatePtCallback(EndAddress - _hostPageSize, lastPageMemory.GetPointer(lastPageOffset, _hostPageSize), _hostPageSize);
+            updatePtCallback(EndAddress - 0x1000, ptPtr + ((IntPtr)_hostPageSize - 0x1000), 0x1000);
+
+            MemoryBlock firstPageMemoryForUnmap = _firstPageMemoryForUnmap;
+            MemoryBlock lastPageMemoryForUnmap = _lastPageMemoryForUnmap;
+
+            if (firstPageMemoryForUnmap != null)
+            {
+                _baseMemory.UnmapView(firstPageMemoryForUnmap, Size + _hostPageSize, _hostPageSize);
+                _firstPageMemoryForUnmap = null;
+            }
+
+            if (lastPageMemoryForUnmap != null)
+            {
+                _baseMemory.UnmapView(lastPageMemoryForUnmap, Size, _hostPageSize);
+                _lastPageMemoryForUnmap = null;
             }
 
             _cachedFirstPagePa = ulong.MaxValue;
             _cachedLastPagePa = ulong.MaxValue;
 
             _hasBridgeAtEnd = false;
-
-            _pageProtections.Remove(EndAddress, GuestPageSize);
         }
 
         private (MemoryBlock, ulong) GetFirstPageMemoryAndOffset()
@@ -697,7 +748,6 @@ namespace Ryujinx.Cpu.Jit
             GC.SuppressFinalize(this);
 
             _privateMemoryAllocator.Dispose();
-            _pageProtections.Dispose();
             _baseMemory.Dispose();
         }
     }

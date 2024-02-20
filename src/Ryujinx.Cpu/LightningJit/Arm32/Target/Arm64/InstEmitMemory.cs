@@ -1129,6 +1129,21 @@ namespace Ryujinx.Cpu.LightningJit.Arm32.Target.Arm64
             if (mmType == MemoryManagerType.HostTracked)
             {
                 int tempRegister = regAlloc.AllocateTempGprRegister();
+                int tempRegister2 = -1;
+
+                if (destination.Value == guestAddress.Value)
+                {
+                    // We can't trash the guest address value here due to the signal handler retry,
+                    // which will just back to the page table read.
+                    // So, if the registers are the same, do a copy.
+
+                    tempRegister2 = regAlloc.AllocateTempGprRegister();
+
+                    Operand guestAddressCopy = new(tempRegister2, RegisterType.Integer, OperandType.I64);
+
+                    asm.Mov(guestAddressCopy, guestAddress);
+                    guestAddress = guestAddressCopy;
+                }
 
                 Operand pte = new(tempRegister, RegisterType.Integer, OperandType.I64);
 
@@ -1137,6 +1152,11 @@ namespace Ryujinx.Cpu.LightningJit.Arm32.Target.Arm64
                 asm.Add(destination64, pte, guestAddress);
 
                 regAlloc.FreeTempGprRegister(tempRegister);
+
+                if (tempRegister2 >= 0)
+                {
+                    regAlloc.FreeTempGprRegister(tempRegister2);
+                }
             }
             else if (mmType == MemoryManagerType.HostMapped || mmType == MemoryManagerType.HostMappedUnsafe)
             {

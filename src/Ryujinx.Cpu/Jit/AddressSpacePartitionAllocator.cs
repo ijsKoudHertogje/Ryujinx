@@ -12,6 +12,8 @@ namespace Ryujinx.Cpu.Jit
 
         public IntPtr Pointer => (IntPtr)((ulong)_allocation.Block.Memory.Pointer + _allocation.Offset);
 
+        public bool IsValid => _owner != null;
+
         public AddressSpacePartitionAllocation(
             AddressSpacePartitionAllocator owner,
             PrivateMemoryAllocatorImpl<AddressSpacePartitionAllocator.Block>.Allocation allocation)
@@ -102,7 +104,7 @@ namespace Ryujinx.Cpu.Jit
             public Block(MemoryTracking tracking, MemoryBlock memory, ulong size, object locker) : base(memory, size)
             {
                 _tracking = tracking;
-                _memoryEh = new(memory, null, tracking, VirtualMemoryEvent);
+                _memoryEh = new(memory, null, tracking, VirtualMemoryEvent, AddressSpacePartitioned.Use4KBProtection ? -12L : 0L);
                 _mappingTree = new();
                 _lock = locker;
             }

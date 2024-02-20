@@ -434,6 +434,7 @@ namespace Ryujinx.Memory
 
         public static ulong GetPageSize()
         {
+            return 0x4000UL;
             return (ulong)Environment.SystemPageSize;
         }
 

@@ -112,7 +112,7 @@ namespace Ryujinx.Cpu.Jit
 
                         (ulong clampedVa, ulong clampedEndVa) = ClampRange(partition, va, endVa);
 
-                        partition.Reprotect(clampedVa, clampedEndVa - clampedVa, protection, _asAllocator, this, _updatePtCallback);
+                        partition.Reprotect(clampedVa, clampedEndVa - clampedVa, protection, this, _updatePtCallback);
 
                         va += clampedEndVa - clampedVa;
                     }
@@ -332,7 +332,7 @@ namespace Ryujinx.Cpu.Jit
                         gapSize = endVa - partition.EndAddress;
                     }
 
-                    _partitions.Insert(i + 1, new(CreateAsPartitionAllocation(partition.EndAddress, gapSize), _backingMemory, partition.EndAddress, gapSize));
+                    _partitions.Insert(i + 1, CreateAsPartition(partition.EndAddress, gapSize));
                     va = partition.EndAddress + gapSize;
                     i++;
                 }
@@ -351,7 +351,7 @@ namespace Ryujinx.Cpu.Jit
                         gapSize = endVa - va;
                     }
 
-                    _partitions.Insert(i, new(CreateAsPartitionAllocation(va, gapSize), _backingMemory, va, gapSize));
+                    _partitions.Insert(i, CreateAsPartition(va, gapSize));
                     va = Math.Min(partition.EndAddress, endVa);
                     i++;
                 }
@@ -359,7 +359,7 @@ namespace Ryujinx.Cpu.Jit
 
             if (va < endVa)
             {
-                _partitions.Add(new(CreateAsPartitionAllocation(va, endVa - va), _backingMemory, va, endVa - va));
+                _partitions.Add(CreateAsPartition(va, endVa - va));
             }
 
             for (int i = 1; i < _partitions.Count; i++)
@@ -369,7 +369,12 @@ namespace Ryujinx.Cpu.Jit
             }
         }
 
-        private AddressSpacePartitionAllocation CreateAsPartitionAllocation(ulong va, ulong size)
+        private AddressSpacePartition CreateAsPartition(ulong va, ulong size)
+        {
+            return new(CreateAsPartitionAllocation(va, size), CreateAsPartitionAllocation(va, size), _backingMemory, va, size);
+        }
+
+        public AddressSpacePartitionAllocation CreateAsPartitionAllocation(ulong va, ulong size)
         {
             ulong bridgeSize = MemoryBlock.GetPageSize() * 2;
 
