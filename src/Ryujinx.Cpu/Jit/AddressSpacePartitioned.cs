@@ -9,7 +9,7 @@ namespace Ryujinx.Cpu.Jit
 {
     class AddressSpacePartitioned : IDisposable
     {
-        public static readonly bool Use4KBProtection = false;
+        public static readonly bool Use4KBProtection = true;
 
         private const int PartitionBits = 25;
         private const ulong PartitionSize = 1UL << PartitionBits;
@@ -19,11 +19,15 @@ namespace Ryujinx.Cpu.Jit
         private readonly AddressSpacePartitionAllocator _asAllocator;
         private readonly Action<ulong, IntPtr, ulong> _updatePtCallback;
 
-        public AddressSpacePartitioned(MemoryTracking tracking, MemoryBlock backingMemory, Action<ulong, IntPtr, ulong> updatePtCallback)
+        public AddressSpacePartitioned(
+            MemoryTracking tracking,
+            MemoryBlock backingMemory,
+            Func<ulong, ulong> readPtCallback,
+            Action<ulong, IntPtr, ulong> updatePtCallback)
         {
             _backingMemory = backingMemory;
             _partitions = new();
-            _asAllocator = new(tracking, _partitions);
+            _asAllocator = new(tracking, readPtCallback, _partitions);
             _updatePtCallback = updatePtCallback;
         }
 

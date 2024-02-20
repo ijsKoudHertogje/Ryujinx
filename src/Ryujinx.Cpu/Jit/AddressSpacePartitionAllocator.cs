@@ -1,3 +1,4 @@
+using Ryujinx.Common;
 using Ryujinx.Common.Collections;
 using Ryujinx.Memory;
 using Ryujinx.Memory.Tracking;
@@ -61,6 +62,7 @@ namespace Ryujinx.Cpu.Jit
         public class Block : PrivateMemoryAllocator.Block
         {
             private readonly MemoryTracking _tracking;
+            private readonly Func<ulong, ulong> _readPtCallback;
             private readonly MemoryEhMeilleure _memoryEh;
 
             private class Mapping : IntrusiveRedBlackTreeNode<Mapping>, IComparable<Mapping>
@@ -101,10 +103,11 @@ namespace Ryujinx.Cpu.Jit
             private readonly IntrusiveRedBlackTree<Mapping> _mappingTree;
             private readonly object _lock;
 
-            public Block(MemoryTracking tracking, MemoryBlock memory, ulong size, object locker) : base(memory, size)
+            public Block(MemoryTracking tracking, Func<ulong, ulong> readPtCallback, MemoryBlock memory, ulong size, object locker) : base(memory, size)
             {
                 _tracking = tracking;
-                _memoryEh = new(memory, null, tracking, VirtualMemoryEvent, AddressSpacePartitioned.Use4KBProtection ? -12L : 0L);
+                _readPtCallback = readPtCallback;
+                _memoryEh = new(memory, null, tracking, VirtualMemoryEvent);
                 _mappingTree = new();
                 _lock = locker;
             }
@@ -119,7 +122,7 @@ namespace Ryujinx.Cpu.Jit
                 _mappingTree.Remove(_mappingTree.GetNode(new Mapping(offset, size, 0, 0, 0)));
             }
 
-            private bool VirtualMemoryEvent(ulong address, ulong size, bool write)
+            private ulong VirtualMemoryEvent(ulong address, ulong size, bool write)
             {
                 Mapping map;
 
@@ -130,7 +133,7 @@ namespace Ryujinx.Cpu.Jit
 
                 if (map == null)
                 {
-                    return false;
+                    return 0;
                 }
 
                 address -= map.Address;
@@ -140,7 +143,17 @@ namespace Ryujinx.Cpu.Jit
                     address -= (ulong)(map.BridgeSize / 2);
                 }
 
-                return _tracking.VirtualMemoryEvent(map.Va + address, size, write);
+                ulong pageSize = MemoryBlock.GetPageSize();
+                ulong addressAligned = BitUtils.AlignDown(address, pageSize);
+                ulong endAddressAligned = BitUtils.AlignUp(address + size, pageSize);
+                ulong sizeAligned = endAddressAligned - addressAligned;
+
+                if (!_tracking.VirtualMemoryEvent(map.Va + addressAligned, sizeAligned, write))
+                {
+                    return 0;
+                }
+
+                return _readPtCallback(map.Va + address);
             }
 
             public override void Destroy()
@@ -152,11 +165,16 @@ namespace Ryujinx.Cpu.Jit
         }
 
         private readonly MemoryTracking _tracking;
+        private readonly Func<ulong, ulong> _readPtCallback;
         private readonly object _lock;
 
-        public AddressSpacePartitionAllocator(MemoryTracking tracking, object locker) : base(DefaultBlockAlignment, MemoryAllocationFlags.Reserve | MemoryAllocationFlags.ViewCompatible)
+        public AddressSpacePartitionAllocator(
+            MemoryTracking tracking,
+            Func<ulong, ulong> readPtCallback,
+            object locker) : base(DefaultBlockAlignment, MemoryAllocationFlags.Reserve | MemoryAllocationFlags.ViewCompatible)
         {
             _tracking = tracking;
+            _readPtCallback = readPtCallback;
             _lock = locker;
         }
 
@@ -178,7 +196,7 @@ namespace Ryujinx.Cpu.Jit
 
         private Block CreateBlock(MemoryBlock memory, ulong size)
         {
-            return new Block(_tracking, memory, size, _lock);
+            return new Block(_tracking, _readPtCallback, memory, size, _lock);
         }
     }
 }

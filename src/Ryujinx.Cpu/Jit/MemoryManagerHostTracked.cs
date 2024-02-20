@@ -76,7 +76,7 @@ namespace Ryujinx.Cpu.Jit
             _backingMemory = backingMemory;
             _pageTable = new PageTable<ulong>();
             _invalidAccessHandler = invalidAccessHandler;
-            _addressSpace = new(Tracking, backingMemory, UpdatePt);
+            _addressSpace = new(Tracking, backingMemory, ReadPt, UpdatePt);
             AddressSpaceSize = addressSpaceSize;
 
             ulong asSize = PageSize;
@@ -129,6 +129,15 @@ namespace Ryujinx.Cpu.Jit
                 pa += PageSize;
                 size -= PageSize;
             }
+        }
+
+        private ulong ReadPt(ulong va)
+        {
+            ulong pte = _flatPageTable.Read<ulong>((va / PageSize) * PteSize);
+
+            pte += va & ~(ulong)PageMask;
+
+            return pte + (va & PageMask);
         }
 
         private void UpdatePt(ulong va, IntPtr ptr, ulong size)
