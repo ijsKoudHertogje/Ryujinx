@@ -143,9 +143,8 @@ namespace Ryujinx.Cpu.Jit
                     address -= (ulong)(map.BridgeSize / 2);
                 }
 
-                ulong pageSize = MemoryBlock.GetPageSize();
-                ulong addressAligned = BitUtils.AlignDown(address, pageSize);
-                ulong endAddressAligned = BitUtils.AlignUp(address + size, pageSize);
+                ulong addressAligned = BitUtils.AlignDown(address, AddressSpacePartition.GuestPageSize);
+                ulong endAddressAligned = BitUtils.AlignUp(address + size, AddressSpacePartition.GuestPageSize);
                 ulong sizeAligned = endAddressAligned - addressAligned;
 
                 if (!_tracking.VirtualMemoryEvent(map.Va + addressAligned, sizeAligned, write))

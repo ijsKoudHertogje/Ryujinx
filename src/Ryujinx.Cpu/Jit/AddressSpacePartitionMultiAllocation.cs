@@ -7,13 +7,12 @@ namespace Ryujinx.Cpu.Jit
     class AddressSpacePartitionMultiAllocation : IDisposable
     {
         private readonly AddressSpacePartitionAllocation _baseMemory;
-        private readonly AddressSpacePartitionAllocation _baseMemoryRo;
+        private AddressSpacePartitionAllocation _baseMemoryRo;
         private AddressSpacePartitionAllocation _baseMemoryNone;
 
-        public AddressSpacePartitionMultiAllocation(AddressSpacePartitionAllocation baseMemory, AddressSpacePartitionAllocation baseMemoryRo)
+        public AddressSpacePartitionMultiAllocation(AddressSpacePartitionAllocation baseMemory)
         {
             _baseMemory = baseMemory;
-            _baseMemoryRo = baseMemoryRo;
         }
 
         public void MapView(MemoryBlock srcBlock, ulong srcOffset, ulong dstOffset, ulong size)
@@ -25,6 +24,12 @@ namespace Ryujinx.Cpu.Jit
                 _baseMemoryRo.MapView(srcBlock, srcOffset, dstOffset, size);
                 _baseMemoryRo.Reprotect(dstOffset, size, MemoryPermission.Read, false);
             }
+        }
+
+        public void LateMapView(MemoryBlock srcBlock, ulong srcOffset, ulong dstOffset, ulong size)
+        {
+            _baseMemoryRo.MapView(srcBlock, srcOffset, dstOffset, size);
+            _baseMemoryRo.Reprotect(dstOffset, size, MemoryPermission.Read, false);
         }
 
         public void UnmapView(MemoryBlock srcBlock, ulong offset, ulong size)
@@ -52,6 +57,12 @@ namespace Ryujinx.Cpu.Jit
             if (permission == MemoryPermission.None && !_baseMemoryNone.IsValid)
             {
                 _baseMemoryNone = addressSpace.CreateAsPartitionAllocation(blockAddress, blockSize);
+            }
+            else if (permission == MemoryPermission.Read && !_baseMemoryRo.IsValid)
+            {
+                _baseMemoryRo = addressSpace.CreateAsPartitionAllocation(blockAddress, blockSize);
+
+                return true;
             }
 
             return false;

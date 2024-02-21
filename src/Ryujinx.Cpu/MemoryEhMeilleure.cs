@@ -64,7 +64,7 @@ namespace Ryujinx.Cpu
 
             if (_tracking.VirtualMemoryEvent(addressAligned, sizeAligned, write))
             {
-                return address;
+                return _baseAddress + address;
             }
 
             return 0;

@@ -426,6 +426,10 @@ namespace ARMeilleure.Signal
             {
                 if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
                 {
+                    Operand lblSkip = Label();
+
+                    context.BranchIf(lblSkip, faultAddress, newAddress, Comparison.Equal);
+
                     Operand ucontextPtr = context.LoadArgument(OperandType.I64, 2);
                     Operand pcCtxAddress = default;
                     ulong baseRegsOffset = 0;
@@ -453,6 +457,8 @@ namespace ARMeilleure.Signal
                     Operand addressDelta = context.Subtract(regAddress, faultAddress);
 
                     context.Store(regCtxAddress, context.Add(newAddress, addressDelta));
+
+                    context.MarkLabel(lblSkip);
                 }
             }
         }

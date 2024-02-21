@@ -375,7 +375,7 @@ namespace Ryujinx.Cpu.Jit
 
         private AddressSpacePartition CreateAsPartition(ulong va, ulong size)
         {
-            return new(CreateAsPartitionAllocation(va, size), CreateAsPartitionAllocation(va, size), _backingMemory, va, size);
+            return new(CreateAsPartitionAllocation(va, size), _backingMemory, va, size);
         }
 
         public AddressSpacePartitionAllocation CreateAsPartitionAllocation(ulong va, ulong size)

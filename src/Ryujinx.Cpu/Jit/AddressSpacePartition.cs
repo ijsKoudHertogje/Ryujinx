@@ -25,7 +25,7 @@ namespace Ryujinx.Cpu.Jit
 
     class AddressSpacePartition : IDisposable
     {
-        private const ulong GuestPageSize = 0x1000;
+        public const ulong GuestPageSize = 0x1000;
 
         private const int DefaultBlockAlignment = 1 << 20;
 
@@ -183,12 +183,7 @@ namespace Ryujinx.Cpu.Jit
         public ulong Size { get; }
         public ulong EndAddress => Address + Size;
 
-        public AddressSpacePartition(
-            AddressSpacePartitionAllocation baseMemory,
-            AddressSpacePartitionAllocation baseMemoryRo,
-            MemoryBlock backingMemory,
-            ulong address,
-            ulong size)
+        public AddressSpacePartition(AddressSpacePartitionAllocation baseMemory, MemoryBlock backingMemory, ulong address, ulong size)
         {
             _privateMemoryAllocator = new PrivateMemoryAllocator(DefaultBlockAlignment, MemoryAllocationFlags.Mirrorable);
             _mappingTree = new IntrusiveRedBlackTree<Mapping>();
@@ -201,7 +196,7 @@ namespace Ryujinx.Cpu.Jit
             _hostPageSize = MemoryBlock.GetPageSize();
 
             _backingMemory = backingMemory;
-            _baseMemory = new(baseMemory, baseMemoryRo);
+            _baseMemory = new(baseMemory);
 
             _cachedFirstPagePa = ulong.MaxValue;
             _cachedLastPagePa = ulong.MaxValue;
@@ -292,11 +287,14 @@ namespace Ryujinx.Cpu.Jit
             AddressSpacePartitioned addressSpace,
             Action<ulong, IntPtr, ulong> updatePtCallback)
         {
-            _baseMemory.LazyInitMirrorForProtection(addressSpace, Address, Size, protection);
+            if (_baseMemory.LazyInitMirrorForProtection(addressSpace, Address, Size, protection))
+            {
+                LateMap();
+            }
 
             updatePtCallback(va, _baseMemory.GetPointerForProtection(va - Address, size, protection), size);
 
-            if (va + size > EndAddress - 0x1000)
+            if (va + size > EndAddress - GuestPageSize)
             {
                 // Protections at the last page also applies to the bridge, if we have one.
                 // (This is because last page access is always done on the bridge, not on our base mapping,
@@ -306,7 +304,7 @@ namespace Ryujinx.Cpu.Jit
                 {
                     IntPtr ptPtr = _baseMemory.GetPointerForProtection(Size, _hostPageSize, protection);
 
-                    updatePtCallback(EndAddress - 0x1000, ptPtr + ((IntPtr)_hostPageSize - 0x1000), 0x1000);
+                    updatePtCallback(EndAddress - GuestPageSize, ptPtr + (IntPtr)(_hostPageSize - GuestPageSize), GuestPageSize);
                 }
 
                 _lastPageProtection = protection;
@@ -354,7 +352,7 @@ namespace Ryujinx.Cpu.Jit
                         ptPtr = _baseMemory.GetPointer(Size, _hostPageSize);;
                     }
 
-                    updatePtCallback(EndAddress - 0x1000, ptPtr + ((IntPtr)_hostPageSize - 0x1000), 0x1000);
+                    updatePtCallback(EndAddress - GuestPageSize, ptPtr + (IntPtr)(_hostPageSize - GuestPageSize), GuestPageSize);
 
                     _firstPageMemoryForUnmap = firstPageMemory;
                     _lastPageMemoryForUnmap = lastPageMemory;
@@ -366,7 +364,7 @@ namespace Ryujinx.Cpu.Jit
                         ? _baseMemory.GetPointerForProtection(Size - _hostPageSize, _hostPageSize, _lastPageProtection)
                         : _baseMemory.GetPointer(Size - _hostPageSize, _hostPageSize);
 
-                    updatePtCallback(EndAddress - 0x1000, ptPtr + ((IntPtr)_hostPageSize - 0x1000), 0x1000);
+                    updatePtCallback(EndAddress - GuestPageSize, ptPtr + (IntPtr)(_hostPageSize - GuestPageSize), GuestPageSize);
 
                     MemoryBlock firstPageMemoryForUnmap = _firstPageMemoryForUnmap;
                     MemoryBlock lastPageMemoryForUnmap = _lastPageMemoryForUnmap;
@@ -397,7 +395,7 @@ namespace Ryujinx.Cpu.Jit
                 ? _baseMemory.GetPointerForProtection(Size - _hostPageSize, _hostPageSize, _lastPageProtection)
                 : _baseMemory.GetPointer(Size - _hostPageSize, _hostPageSize);
 
-            updatePtCallback(EndAddress - 0x1000, ptPtr + ((IntPtr)_hostPageSize - 0x1000), 0x1000);
+            updatePtCallback(EndAddress - GuestPageSize, ptPtr + (IntPtr)(_hostPageSize - GuestPageSize), GuestPageSize);
 
             MemoryBlock firstPageMemoryForUnmap = _firstPageMemoryForUnmap;
             MemoryBlock lastPageMemoryForUnmap = _lastPageMemoryForUnmap;
@@ -682,6 +680,22 @@ namespace Ryujinx.Cpu.Jit
         private static bool CanCoalesce(PrivateMapping left, PrivateMapping right)
         {
             return !left.PrivateAllocation.IsValid && !right.PrivateAllocation.IsValid;
+        }
+
+        private void LateMap()
+        {
+            // Map all existing private allocations.
+            // This is necessary to ensure mirrors that are lazily created have the same mappings as the main one.
+
+            PrivateMapping map = _privateTree.GetNode(new PrivateMapping(Address, 1UL, default));
+
+            for (; map != null; map = map.Successor)
+            {
+                if (map.PrivateAllocation.IsValid)
+                {
+                    _baseMemory.LateMapView(map.PrivateAllocation.Memory, map.PrivateAllocation.Offset, map.Address - Address, map.Size);
+                }
+            }
         }
 
         public PrivateRange GetFirstPrivateAllocation(ulong va, ulong size, out ulong nextVa)
