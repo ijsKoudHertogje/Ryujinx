@@ -38,26 +38,22 @@ namespace Ryujinx.Cpu.Jit
         private readonly InvalidAccessHandler _invalidAccessHandler;
 
         private readonly MemoryBlock _backingMemory;
-        private readonly PageTable<ulong> _pageTable;
 
         private readonly ulong[] _pageBitmap;
 
         public int AddressSpaceBits { get; }
 
-        public MemoryTracking Tracking { get; private set; }
+        public MemoryTracking Tracking { get; }
 
-        private const int PteSize = 8;
-
+        private readonly NativePageTable _nativePageTable;
         private readonly AddressSpacePartitioned _addressSpace;
 
         public ulong AddressSpaceSize { get; }
 
-        private readonly MemoryBlock _flatPageTable;
-
         /// <inheritdoc/>
         public bool Supports4KBPages => false;
 
-        public IntPtr PageTablePointer => _flatPageTable.Pointer;
+        public IntPtr PageTablePointer => _nativePageTable.PageTablePointer;
 
         public MemoryManagerType Type => MemoryManagerType.HostTracked;
 
@@ -74,9 +70,7 @@ namespace Ryujinx.Cpu.Jit
             Tracking = new MemoryTracking(this, AddressSpacePartitioned.Use4KBProtection ? PageSize : (int)MemoryBlock.GetPageSize(), invalidAccessHandler);
 
             _backingMemory = backingMemory;
-            _pageTable = new PageTable<ulong>();
             _invalidAccessHandler = invalidAccessHandler;
-            _addressSpace = new(Tracking, backingMemory, ReadPt, UpdatePt);
             AddressSpaceSize = addressSpaceSize;
 
             ulong asSize = PageSize;
@@ -91,7 +85,8 @@ namespace Ryujinx.Cpu.Jit
             AddressSpaceBits = asBits;
 
             _pageBitmap = new ulong[1 << (AddressSpaceBits - (PageBits + PageToPteShift))];
-            _flatPageTable = new MemoryBlock((asSize / PageSize) * PteSize);
+            _nativePageTable = new(asSize);
+            _addressSpace = new(Tracking, backingMemory, _nativePageTable.Read, _nativePageTable.Update);
         }
 
         /// <inheritdoc/>
@@ -105,52 +100,9 @@ namespace Ryujinx.Cpu.Jit
             }
 
             AddMapping(va, size);
-            PtMap(va, pa, size, flags.HasFlag(MemoryMapFlags.Private));
+            _nativePageTable.Map(va, pa, size, _addressSpace, _backingMemory, flags.HasFlag(MemoryMapFlags.Private));
 
             Tracking.Map(va, size);
-        }
-
-        private void PtMap(ulong va, ulong pa, ulong size, bool privateMap)
-        {
-            while (size != 0)
-            {
-                _pageTable.Map(va, pa);
-
-                if (privateMap)
-                {
-                    _flatPageTable.Write((va / PageSize) * PteSize, (ulong)_addressSpace.GetPointer(va, PageSize) - va);
-                }
-                else
-                {
-                    _flatPageTable.Write((va / PageSize) * PteSize, (ulong)_backingMemory.GetPointer(pa, PageSize) - va);
-                }
-
-                va += PageSize;
-                pa += PageSize;
-                size -= PageSize;
-            }
-        }
-
-        private ulong ReadPt(ulong va)
-        {
-            ulong pte = _flatPageTable.Read<ulong>((va / PageSize) * PteSize);
-
-            pte += va & ~(ulong)PageMask;
-
-            return pte + (va & PageMask);
-        }
-
-        private void UpdatePt(ulong va, IntPtr ptr, ulong size)
-        {
-            ulong remainingSize = size;
-            while (remainingSize != 0)
-            {
-                _flatPageTable.Write((va / PageSize) * PteSize, (ulong)ptr - va);
-
-                va += PageSize;
-                ptr += PageSize;
-                remainingSize -= PageSize;
-            }
         }
 
         /// <inheritdoc/>
@@ -170,19 +122,7 @@ namespace Ryujinx.Cpu.Jit
             Tracking.Unmap(va, size);
 
             RemoveMapping(va, size);
-            PtUnmap(va, size);
-        }
-
-        private void PtUnmap(ulong va, ulong size)
-        {
-            while (size != 0)
-            {
-                _pageTable.Unmap(va);
-                _flatPageTable.Write((va / PageSize) * PteSize, 0UL);
-
-                va += PageSize;
-                size -= PageSize;
-            }
+            _nativePageTable.Unmap(va, size);
         }
 
         /// <summary>
@@ -903,7 +843,7 @@ namespace Ryujinx.Cpu.Jit
 
         private ulong GetPhysicalAddressInternal(ulong va)
         {
-            return _pageTable.Read(va) + (va & PageMask);
+            return _nativePageTable.GetPhysicalAddress(va);
         }
 
         private static void ThrowInvalidMemoryRegionException(string message) => throw new InvalidMemoryRegionException(message);
@@ -1008,6 +948,7 @@ namespace Ryujinx.Cpu.Jit
         protected override void Destroy()
         {
             _addressSpace.Dispose();
+            _nativePageTable.Dispose();
         }
     }
 }
