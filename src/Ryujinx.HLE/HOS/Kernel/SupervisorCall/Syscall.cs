@@ -1,4 +1,4 @@
-﻿using Ryujinx.Common;
+using Ryujinx.Common;
 using Ryujinx.Common.Logging;
 using Ryujinx.Cpu;
 using Ryujinx.HLE.Exceptions;
@@ -8,6 +8,7 @@ using Ryujinx.HLE.HOS.Kernel.Memory;
 using Ryujinx.HLE.HOS.Kernel.Process;
 using Ryujinx.HLE.HOS.Kernel.Threading;
 using Ryujinx.Horizon.Common;
+using Ryujinx.Memory;
 using System;
 using System.Buffers;
 using System.Threading;
@@ -949,8 +950,16 @@ namespace Ryujinx.HLE.HOS.Kernel.SupervisorCall
 
             MemoryAttribute attributes = attributeMask | attributeValue;
 
+            const MemoryAttribute SupportedAttributes = MemoryAttribute.Uncached | MemoryAttribute.PermissionLocked;
+
             if (attributes != attributeMask ||
-               (attributes | MemoryAttribute.Uncached) != MemoryAttribute.Uncached)
+               (attributes | SupportedAttributes) != SupportedAttributes)
+            {
+                return KernelResult.InvalidCombination;
+            }
+
+            // The permission locked attribute can't be unset.
+            if ((attributeMask & MemoryAttribute.PermissionLocked) != (attributeValue & MemoryAttribute.PermissionLocked))
             {
                 return KernelResult.InvalidCombination;
             }
@@ -3133,6 +3142,37 @@ namespace Ryujinx.HLE.HOS.Kernel.SupervisorCall
             return Result.Success;
         }
 #pragma warning restore CA1822
+
+        // Not actual syscalls, used by HLE services and such.
+
+        public IExternalEvent GetExternalEvent(int handle)
+        {
+            KWritableEvent writableEvent = KernelStatic.GetCurrentProcess().HandleTable.GetObject<KWritableEvent>(handle);
+
+            if (writableEvent == null)
+            {
+                return null;
+            }
+
+            return new ExternalEvent(writableEvent);
+        }
+
+        public IVirtualMemoryManager GetMemoryManagerByProcessHandle(int handle)
+        {
+            return KernelStatic.GetCurrentProcess().HandleTable.GetKProcess(handle).CpuMemory;
+        }
+
+        public ulong GetTransferMemoryAddress(int handle)
+        {
+            KTransferMemory transferMemory = KernelStatic.GetCurrentProcess().HandleTable.GetObject<KTransferMemory>(handle);
+
+            if (transferMemory == null)
+            {
+                return 0;
+            }
+
+            return transferMemory.Address;
+        }
 
         private static bool IsPointingInsideKernel(ulong address)
         {

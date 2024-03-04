@@ -1,4 +1,4 @@
-﻿using Ryujinx.Horizon.Bcat.Types;
+using Ryujinx.Horizon.Bcat.Types;
 using Ryujinx.Horizon.Sdk.Sf.Hipc;
 using Ryujinx.Horizon.Sdk.Sm;
 
@@ -44,6 +44,7 @@ namespace Ryujinx.Horizon.Bcat
         public void Shutdown()
         {
             _serverManager.Dispose();
+            _sm.Dispose();
         }
     }
 }

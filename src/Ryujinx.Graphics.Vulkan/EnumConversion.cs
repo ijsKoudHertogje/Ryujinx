@@ -1,4 +1,4 @@
-﻿using Ryujinx.Common.Logging;
+using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Shader;
 using Silk.NET.Vulkan;
@@ -376,7 +376,7 @@ namespace Ryujinx.Graphics.Vulkan
         {
             return format switch
             {
-                Format.D16Unorm or Format.D32Float => ImageAspectFlags.DepthBit,
+                Format.D16Unorm or Format.D32Float or Format.X8UintD24Unorm => ImageAspectFlags.DepthBit,
                 Format.S8Uint => ImageAspectFlags.StencilBit,
                 Format.D24UnormS8Uint or
                 Format.D32FloatS8Uint or
@@ -389,7 +389,7 @@ namespace Ryujinx.Graphics.Vulkan
         {
             return format switch
             {
-                Format.D16Unorm or Format.D32Float => ImageAspectFlags.DepthBit,
+                Format.D16Unorm or Format.D32Float or Format.X8UintD24Unorm => ImageAspectFlags.DepthBit,
                 Format.S8Uint => ImageAspectFlags.StencilBit,
                 Format.D24UnormS8Uint or
                 Format.D32FloatS8Uint or
@@ -424,12 +424,12 @@ namespace Ryujinx.Graphics.Vulkan
 
         public static BufferAllocationType Convert(this BufferAccess access)
         {
-            return access switch
+            if (access.HasFlag(BufferAccess.FlushPersistent) || access.HasFlag(BufferAccess.Stream))
             {
-                BufferAccess.FlushPersistent => BufferAllocationType.HostMapped,
-                BufferAccess.Stream => BufferAllocationType.HostMapped,
-                _ => BufferAllocationType.Auto,
-            };
+                return BufferAllocationType.HostMapped;
+            }
+
+            return BufferAllocationType.Auto;
         }
 
         private static T2 LogInvalidAndReturn<T1, T2>(T1 value, string name, T2 defaultValue = default)

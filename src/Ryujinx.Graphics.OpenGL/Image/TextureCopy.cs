@@ -294,7 +294,7 @@ namespace Ryujinx.Graphics.OpenGL.Image
             {
                 return FramebufferAttachment.DepthStencilAttachment;
             }
-            else if (IsDepthOnly(format))
+            else if (FormatTable.IsDepthOnly(format))
             {
                 return FramebufferAttachment.DepthAttachment;
             }
@@ -324,11 +324,11 @@ namespace Ryujinx.Graphics.OpenGL.Image
 
         private static ClearBufferMask GetMask(Format format)
         {
-            if (format == Format.D24UnormS8Uint || format == Format.D32FloatS8Uint || format == Format.S8UintD24Unorm)
+            if (FormatTable.IsPackedDepthStencil(format))
             {
                 return ClearBufferMask.DepthBufferBit | ClearBufferMask.StencilBufferBit;
             }
-            else if (IsDepthOnly(format))
+            else if (FormatTable.IsDepthOnly(format))
             {
                 return ClearBufferMask.DepthBufferBit;
             }
@@ -340,11 +340,6 @@ namespace Ryujinx.Graphics.OpenGL.Image
             {
                 return ClearBufferMask.ColorBufferBit;
             }
-        }
-
-        private static bool IsDepthOnly(Format format)
-        {
-            return format == Format.D16Unorm || format == Format.D32Float;
         }
 
         public TextureView BgraSwap(TextureView from)
@@ -367,7 +362,7 @@ namespace Ryujinx.Graphics.OpenGL.Image
             return to;
         }
 
-        private TextureView PboCopy(TextureView from, TextureView to, int srcLayer, int dstLayer, int srcLevel, int dstLevel, int width, int height)
+        public void PboCopy(TextureView from, TextureView to, int srcLayer, int dstLayer, int srcLevel, int dstLevel, int width, int height)
         {
             int dstWidth = width;
             int dstHeight = height;
@@ -445,8 +440,6 @@ namespace Ryujinx.Graphics.OpenGL.Image
             }
 
             GL.BindBuffer(BufferTarget.PixelUnpackBuffer, 0);
-
-            return to;
         }
 
         private void EnsurePbo(TextureView view)

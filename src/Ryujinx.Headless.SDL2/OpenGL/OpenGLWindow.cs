@@ -1,4 +1,4 @@
-﻿using OpenTK;
+using OpenTK;
 using OpenTK.Graphics.OpenGL;
 using Ryujinx.Common.Configuration;
 using Ryujinx.Common.Logging;
@@ -95,6 +95,8 @@ namespace Ryujinx.Headless.SDL2.OpenGL
                     throw new Exception(errorMessage);
                 }
             }
+
+            public bool HasContext() => SDL_GL_GetCurrentContext() != IntPtr.Zero;
 
             public void Dispose()
             {

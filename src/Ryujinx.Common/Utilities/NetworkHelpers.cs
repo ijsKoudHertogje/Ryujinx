@@ -1,4 +1,4 @@
-﻿using System.Buffers.Binary;
+using System.Buffers.Binary;
 using System.Net;
 using System.Net.NetworkInformation;
 
@@ -73,6 +73,11 @@ namespace Ryujinx.Common.Utilities
         public static uint ConvertIpv4Address(string ipAddress)
         {
             return ConvertIpv4Address(IPAddress.Parse(ipAddress));
+        }
+
+        public static IPAddress ConvertUint(uint ipAddress)
+        {
+            return new IPAddress(new byte[] { (byte)((ipAddress >> 24) & 0xFF), (byte)((ipAddress >> 16) & 0xFF), (byte)((ipAddress >> 8) & 0xFF), (byte)(ipAddress & 0xFF) });
         }
     }
 }

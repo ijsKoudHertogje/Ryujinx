@@ -1,4 +1,4 @@
-﻿using Ryujinx.Graphics.GAL.Multithreading.Commands;
+using Ryujinx.Graphics.GAL.Multithreading.Commands;
 using Ryujinx.Graphics.GAL.Multithreading.Model;
 using Ryujinx.Graphics.GAL.Multithreading.Resources;
 using Ryujinx.Graphics.Shader;
@@ -177,9 +177,9 @@ namespace Ryujinx.Graphics.GAL.Multithreading
             _renderer.QueueCommand();
         }
 
-        public void SetImage(int binding, ITexture texture, Format imageFormat)
+        public void SetImage(ShaderStage stage, int binding, ITexture texture, Format imageFormat)
         {
-            _renderer.New<SetImageCommand>().Set(binding, Ref(texture), imageFormat);
+            _renderer.New<SetImageCommand>().Set(stage, binding, Ref(texture), imageFormat);
             _renderer.QueueCommand();
         }
 

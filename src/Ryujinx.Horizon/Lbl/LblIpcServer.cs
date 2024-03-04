@@ -1,4 +1,4 @@
-﻿using Ryujinx.Horizon.Lbl.Ipc;
+using Ryujinx.Horizon.Lbl.Ipc;
 using Ryujinx.Horizon.Sdk.Sf.Hipc;
 using Ryujinx.Horizon.Sdk.Sm;
 
@@ -38,6 +38,7 @@ namespace Ryujinx.Horizon.Lbl
         public void Shutdown()
         {
             _serverManager.Dispose();
+            _sm.Dispose();
         }
     }
 }

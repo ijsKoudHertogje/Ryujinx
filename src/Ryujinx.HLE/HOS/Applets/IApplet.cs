@@ -1,5 +1,5 @@
-﻿using Ryujinx.HLE.HOS.Services.Am.AppletAE;
-using Ryujinx.HLE.Ui;
+using Ryujinx.HLE.HOS.Services.Am.AppletAE;
+using Ryujinx.HLE.UI;
 using Ryujinx.Memory;
 using System;
 using System.Runtime.InteropServices;

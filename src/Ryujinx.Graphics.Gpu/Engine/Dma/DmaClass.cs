@@ -1,4 +1,4 @@
-﻿using Ryujinx.Common;
+using Ryujinx.Common;
 using Ryujinx.Graphics.Device;
 using Ryujinx.Graphics.Gpu.Engine.Threed;
 using Ryujinx.Graphics.Gpu.Memory;
@@ -211,6 +211,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Dma
             int xCount = (int)_state.State.LineLengthIn;
             int yCount = (int)_state.State.LineCount;
 
+            _channel.TextureManager.RefreshModifiedTextures();
             _3dEngine.CreatePendingSyncs();
             _3dEngine.FlushUboDirty();
 
@@ -276,10 +277,22 @@ namespace Ryujinx.Graphics.Gpu.Engine.Dma
 
                 ReadOnlySpan<byte> srcSpan = memoryManager.GetSpan(srcGpuVa + (ulong)srcBaseOffset, srcSize, true);
 
+                // If remapping is disabled, we always copy the components directly, in order.
+                // If it's enabled, but the mapping is just XYZW, we also copy them in order.
+                bool isIdentityRemap = !remap ||
+                    (_state.State.SetRemapComponentsDstX == SetRemapComponentsDst.SrcX &&
+                    (dstComponents < 2 || _state.State.SetRemapComponentsDstY == SetRemapComponentsDst.SrcY) &&
+                    (dstComponents < 3 || _state.State.SetRemapComponentsDstZ == SetRemapComponentsDst.SrcZ) &&
+                    (dstComponents < 4 || _state.State.SetRemapComponentsDstW == SetRemapComponentsDst.SrcW));
+
                 bool completeSource = IsTextureCopyComplete(src, srcLinear, srcBpp, srcStride, xCount, yCount);
                 bool completeDest = IsTextureCopyComplete(dst, dstLinear, dstBpp, dstStride, xCount, yCount);
 
-                if (completeSource && completeDest)
+                // Try to set the texture data directly,
+                // but only if we are doing a complete copy,
+                // and not for block linear to linear copies, since those are typically accessed from the CPU.
+
+                if (completeSource && completeDest && !(dstLinear && !srcLinear) && isIdentityRemap)
                 {
                     var target = memoryManager.Physical.TextureCache.FindTexture(
                         memoryManager,
@@ -347,14 +360,6 @@ namespace Ryujinx.Graphics.Gpu.Engine.Dma
 
                 TextureParams srcParams = new(srcRegionX, srcRegionY, srcBaseOffset, srcBpp, srcLinear, srcCalculator);
                 TextureParams dstParams = new(dstRegionX, dstRegionY, dstBaseOffset, dstBpp, dstLinear, dstCalculator);
-
-                // If remapping is enabled, we always copy the components directly, in order.
-                // If it's enabled, but the mapping is just XYZW, we also copy them in order.
-                bool isIdentityRemap = !remap ||
-                    (_state.State.SetRemapComponentsDstX == SetRemapComponentsDst.SrcX &&
-                    (dstComponents < 2 || _state.State.SetRemapComponentsDstY == SetRemapComponentsDst.SrcY) &&
-                    (dstComponents < 3 || _state.State.SetRemapComponentsDstZ == SetRemapComponentsDst.SrcZ) &&
-                    (dstComponents < 4 || _state.State.SetRemapComponentsDstW == SetRemapComponentsDst.SrcW));
 
                 if (isIdentityRemap)
                 {

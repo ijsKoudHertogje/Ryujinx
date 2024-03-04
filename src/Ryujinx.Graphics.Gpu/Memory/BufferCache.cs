@@ -3,6 +3,7 @@ using Ryujinx.Memory.Range;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 
 namespace Ryujinx.Graphics.Gpu.Memory
 {
@@ -11,11 +12,23 @@ namespace Ryujinx.Graphics.Gpu.Memory
     /// </summary>
     class BufferCache : IDisposable
     {
-        private const int OverlapsBufferInitialCapacity = 10;
-        private const int OverlapsBufferMaxCapacity = 10000;
+        /// <summary>
+        /// Initial size for the array holding overlaps.
+        /// </summary>
+        public const int OverlapsBufferInitialCapacity = 10;
+
+        /// <summary>
+        /// Maximum size that an array holding overlaps may have after trimming.
+        /// </summary>
+        public const int OverlapsBufferMaxCapacity = 10000;
 
         private const ulong BufferAlignmentSize = 0x1000;
         private const ulong BufferAlignmentMask = BufferAlignmentSize - 1;
+
+        /// <summary>
+        /// Alignment required for sparse buffer mappings.
+        /// </summary>
+        public const ulong SparseBufferAlignmentSize = 0x10000;
 
         private const ulong MaxDynamicGrowthSize = 0x100000;
 
@@ -27,12 +40,14 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// Must lock for any access from other threads.
         /// </remarks>
         private readonly RangeList<Buffer> _buffers;
+        private readonly MultiRangeList<MultiRangeBuffer> _multiRangeBuffers;
 
         private Buffer[] _bufferOverlaps;
 
         private readonly Dictionary<ulong, BufferCacheEntry> _dirtyCache;
         private readonly Dictionary<ulong, BufferCacheEntry> _modifiedCache;
         private bool _pruneCaches;
+        private int _virtualModifiedSequenceNumber;
 
         public event Action NotifyBuffersModified;
 
@@ -47,6 +62,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
             _physicalMemory = physicalMemory;
 
             _buffers = new RangeList<Buffer>();
+            _multiRangeBuffers = new MultiRangeList<MultiRangeBuffer>();
 
             _bufferOverlaps = new Buffer[OverlapsBufferInitialCapacity];
 
@@ -66,45 +82,142 @@ namespace Ryujinx.Graphics.Gpu.Memory
             Buffer[] overlaps = new Buffer[10];
             int overlapCount;
 
-            ulong address = ((MemoryManager)sender).Translate(e.Address);
-            ulong size = e.Size;
+            MultiRange range = ((MemoryManager)sender).GetPhysicalRegions(e.Address, e.Size);
 
-            lock (_buffers)
+            for (int index = 0; index < range.Count; index++)
             {
-                overlapCount = _buffers.FindOverlaps(address, size, ref overlaps);
-            }
+                MemoryRange subRange = range.GetSubRange(index);
 
-            for (int i = 0; i < overlapCount; i++)
-            {
-                overlaps[i].Unmapped(address, size);
+                lock (_buffers)
+                {
+                    overlapCount = _buffers.FindOverlaps(subRange.Address, subRange.Size, ref overlaps);
+                }
+
+                for (int i = 0; i < overlapCount; i++)
+                {
+                    overlaps[i].Unmapped(subRange.Address, subRange.Size);
+                }
             }
         }
 
         /// <summary>
         /// Performs address translation of the GPU virtual address, and creates a
-        /// new buffer, if needed, for the specified range.
+        /// new buffer, if needed, for the specified contiguous range.
         /// </summary>
         /// <param name="memoryManager">GPU memory manager where the buffer is mapped</param>
         /// <param name="gpuVa">Start GPU virtual address of the buffer</param>
         /// <param name="size">Size in bytes of the buffer</param>
-        /// <returns>CPU virtual address of the buffer, after address translation</returns>
-        public ulong TranslateAndCreateBuffer(MemoryManager memoryManager, ulong gpuVa, ulong size)
+        /// <returns>Contiguous physical range of the buffer, after address translation</returns>
+        public MultiRange TranslateAndCreateBuffer(MemoryManager memoryManager, ulong gpuVa, ulong size)
         {
             if (gpuVa == 0)
             {
-                return 0;
+                return new MultiRange(MemoryManager.PteUnmapped, size);
             }
 
             ulong address = memoryManager.Translate(gpuVa);
 
-            if (address == MemoryManager.PteUnmapped)
+            if (address != MemoryManager.PteUnmapped)
             {
-                return 0;
+                CreateBuffer(address, size);
             }
 
-            CreateBuffer(address, size);
+            return new MultiRange(address, size);
+        }
 
-            return address;
+        /// <summary>
+        /// Performs address translation of the GPU virtual address, and creates
+        /// new physical and virtual buffers, if needed, for the specified range.
+        /// </summary>
+        /// <param name="memoryManager">GPU memory manager where the buffer is mapped</param>
+        /// <param name="gpuVa">Start GPU virtual address of the buffer</param>
+        /// <param name="size">Size in bytes of the buffer</param>
+        /// <returns>Physical ranges of the buffer, after address translation</returns>
+        public MultiRange TranslateAndCreateMultiBuffers(MemoryManager memoryManager, ulong gpuVa, ulong size)
+        {
+            if (gpuVa == 0)
+            {
+                return new MultiRange(MemoryManager.PteUnmapped, size);
+            }
+
+            // Fast path not taken for non-contiguous ranges,
+            // since multi-range buffers are not coalesced, so a buffer that covers
+            // the entire cached range might not actually exist.
+            if (memoryManager.VirtualRangeCache.TryGetOrAddRange(gpuVa, size, out MultiRange range) &&
+                range.Count == 1)
+            {
+                return range;
+            }
+
+            CreateBuffer(range);
+
+            return range;
+        }
+
+        /// <summary>
+        /// Performs address translation of the GPU virtual address, and creates
+        /// new physical buffers, if needed, for the specified range.
+        /// </summary>
+        /// <param name="memoryManager">GPU memory manager where the buffer is mapped</param>
+        /// <param name="gpuVa">Start GPU virtual address of the buffer</param>
+        /// <param name="size">Size in bytes of the buffer</param>
+        /// <returns>Physical ranges of the buffer, after address translation</returns>
+        public MultiRange TranslateAndCreateMultiBuffersPhysicalOnly(MemoryManager memoryManager, ulong gpuVa, ulong size)
+        {
+            if (gpuVa == 0)
+            {
+                return new MultiRange(MemoryManager.PteUnmapped, size);
+            }
+
+            // Fast path not taken for non-contiguous ranges,
+            // since multi-range buffers are not coalesced, so a buffer that covers
+            // the entire cached range might not actually exist.
+            if (memoryManager.VirtualRangeCache.TryGetOrAddRange(gpuVa, size, out MultiRange range) &&
+                range.Count == 1)
+            {
+                return range;
+            }
+
+            for (int i = 0; i < range.Count; i++)
+            {
+                MemoryRange subRange = range.GetSubRange(i);
+
+                if (subRange.Address != MemoryManager.PteUnmapped)
+                {
+                    if (range.Count > 1)
+                    {
+                        CreateBuffer(subRange.Address, subRange.Size, SparseBufferAlignmentSize);
+                    }
+                    else
+                    {
+                        CreateBuffer(subRange.Address, subRange.Size);
+                    }
+                }
+            }
+
+            return range;
+        }
+
+        /// <summary>
+        /// Creates a new buffer for the specified range, if it does not yet exist.
+        /// This can be used to ensure the existance of a buffer.
+        /// </summary>
+        /// <param name="range">Physical ranges of memory where the buffer data is located</param>
+        public void CreateBuffer(MultiRange range)
+        {
+            if (range.Count > 1)
+            {
+                CreateMultiRangeBuffer(range);
+            }
+            else
+            {
+                MemoryRange subRange = range.GetSubRange(0);
+
+                if (subRange.Address != MemoryManager.PteUnmapped)
+                {
+                    CreateBuffer(subRange.Address, subRange.Size);
+                }
+            }
         }
 
         /// <summary>
@@ -118,7 +231,6 @@ namespace Ryujinx.Graphics.Gpu.Memory
             ulong endAddress = address + size;
 
             ulong alignedAddress = address & ~BufferAlignmentMask;
-
             ulong alignedEndAddress = (endAddress + BufferAlignmentMask) & ~BufferAlignmentMask;
 
             // The buffer must have the size of at least one page.
@@ -128,6 +240,175 @@ namespace Ryujinx.Graphics.Gpu.Memory
             }
 
             CreateBufferAligned(alignedAddress, alignedEndAddress - alignedAddress);
+        }
+
+        /// <summary>
+        /// Creates a new buffer for the specified range, if it does not yet exist.
+        /// This can be used to ensure the existance of a buffer.
+        /// </summary>
+        /// <param name="address">Address of the buffer in memory</param>
+        /// <param name="size">Size of the buffer in bytes</param>
+        /// <param name="alignment">Alignment of the start address of the buffer in bytes</param>
+        public void CreateBuffer(ulong address, ulong size, ulong alignment)
+        {
+            ulong alignmentMask = alignment - 1;
+            ulong pageAlignmentMask = BufferAlignmentMask;
+            ulong endAddress = address + size;
+
+            ulong alignedAddress = address & ~alignmentMask;
+            ulong alignedEndAddress = (endAddress + pageAlignmentMask) & ~pageAlignmentMask;
+
+            // The buffer must have the size of at least one page.
+            if (alignedEndAddress == alignedAddress)
+            {
+                alignedEndAddress += pageAlignmentMask;
+            }
+
+            CreateBufferAligned(alignedAddress, alignedEndAddress - alignedAddress, alignment);
+        }
+
+        /// <summary>
+        /// Creates a buffer for a memory region composed of multiple physical ranges,
+        /// if it does not exist yet.
+        /// </summary>
+        /// <param name="range">Physical ranges of memory</param>
+        private void CreateMultiRangeBuffer(MultiRange range)
+        {
+            // Ensure all non-contiguous buffer we might use are sparse aligned.
+            for (int i = 0; i < range.Count; i++)
+            {
+                MemoryRange subRange = range.GetSubRange(i);
+
+                if (subRange.Address != MemoryManager.PteUnmapped)
+                {
+                    CreateBuffer(subRange.Address, subRange.Size, SparseBufferAlignmentSize);
+                }
+            }
+
+            // Create sparse buffer.
+            MultiRangeBuffer[] overlaps = new MultiRangeBuffer[10];
+
+            int overlapCount = _multiRangeBuffers.FindOverlaps(range, ref overlaps);
+
+            for (int index = 0; index < overlapCount; index++)
+            {
+                if (overlaps[index].Range.Contains(range))
+                {
+                    return;
+                }
+            }
+
+            for (int index = 0; index < overlapCount; index++)
+            {
+                if (range.Contains(overlaps[index].Range))
+                {
+                    _multiRangeBuffers.Remove(overlaps[index]);
+                    overlaps[index].Dispose();
+                }
+            }
+
+            MultiRangeBuffer multiRangeBuffer;
+
+            MemoryRange[] alignedSubRanges = new MemoryRange[range.Count];
+
+            ulong alignmentMask = SparseBufferAlignmentSize - 1;
+
+            if (_context.Capabilities.SupportsSparseBuffer)
+            {
+                BufferRange[] storages = new BufferRange[range.Count];
+
+                for (int i = 0; i < range.Count; i++)
+                {
+                    MemoryRange subRange = range.GetSubRange(i);
+
+                    if (subRange.Address != MemoryManager.PteUnmapped)
+                    {
+                        ulong endAddress = subRange.Address + subRange.Size;
+
+                        ulong alignedAddress = subRange.Address & ~alignmentMask;
+                        ulong alignedEndAddress = (endAddress + alignmentMask) & ~alignmentMask;
+                        ulong alignedSize = alignedEndAddress - alignedAddress;
+
+                        Buffer buffer = _buffers.FindFirstOverlap(alignedAddress, alignedSize);
+                        BufferRange bufferRange = buffer.GetRange(alignedAddress, alignedSize, false);
+
+                        alignedSubRanges[i] = new MemoryRange(alignedAddress, alignedSize);
+                        storages[i] = bufferRange;
+                    }
+                    else
+                    {
+                        ulong alignedSize = (subRange.Size + alignmentMask) & ~alignmentMask;
+
+                        alignedSubRanges[i] = new MemoryRange(MemoryManager.PteUnmapped, alignedSize);
+                        storages[i] = new BufferRange(BufferHandle.Null, 0, (int)alignedSize);
+                    }
+                }
+
+                multiRangeBuffer = new(_context, new MultiRange(alignedSubRanges), storages);
+            }
+            else
+            {
+                for (int i = 0; i < range.Count; i++)
+                {
+                    MemoryRange subRange = range.GetSubRange(i);
+
+                    if (subRange.Address != MemoryManager.PteUnmapped)
+                    {
+                        ulong endAddress = subRange.Address + subRange.Size;
+
+                        ulong alignedAddress = subRange.Address & ~alignmentMask;
+                        ulong alignedEndAddress = (endAddress + alignmentMask) & ~alignmentMask;
+                        ulong alignedSize = alignedEndAddress - alignedAddress;
+
+                        alignedSubRanges[i] = new MemoryRange(alignedAddress, alignedSize);
+                    }
+                    else
+                    {
+                        ulong alignedSize = (subRange.Size + alignmentMask) & ~alignmentMask;
+
+                        alignedSubRanges[i] = new MemoryRange(MemoryManager.PteUnmapped, alignedSize);
+                    }
+                }
+
+                multiRangeBuffer = new(_context, new MultiRange(alignedSubRanges));
+
+                UpdateVirtualBufferDependencies(multiRangeBuffer);
+            }
+
+            _multiRangeBuffers.Add(multiRangeBuffer);
+        }
+
+        /// <summary>
+        /// Adds two-way dependencies to all physical buffers contained within a given virtual buffer.
+        /// </summary>
+        /// <param name="virtualBuffer">Virtual buffer to have dependencies added</param>
+        private void UpdateVirtualBufferDependencies(MultiRangeBuffer virtualBuffer)
+        {
+            virtualBuffer.ClearPhysicalDependencies();
+
+            ulong dstOffset = 0;
+
+            HashSet<Buffer> physicalBuffers = new();
+
+            for (int i = 0; i < virtualBuffer.Range.Count; i++)
+            {
+                MemoryRange subRange = virtualBuffer.Range.GetSubRange(i);
+
+                if (subRange.Address != MemoryManager.PteUnmapped)
+                {
+                    Buffer buffer = _buffers.FindFirstOverlap(subRange.Address, subRange.Size);
+
+                    virtualBuffer.AddPhysicalDependency(buffer, subRange.Address, dstOffset, subRange.Size);
+                    physicalBuffers.Add(buffer);
+                }
+
+                dstOffset += subRange.Size;
+            }
+
+            foreach (var buffer in physicalBuffers)
+            {
+                buffer.CopyToDependantVirtualBuffer(virtualBuffer);
+            }
         }
 
         /// <summary>
@@ -150,7 +431,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
                 result.EndGpuAddress < gpuVa + size ||
                 result.UnmappedSequence != result.Buffer.UnmappedSequence)
             {
-                ulong address = TranslateAndCreateBuffer(memoryManager, gpuVa, size);
+                MultiRange range = TranslateAndCreateBuffer(memoryManager, gpuVa, size);
+                ulong address = range.GetSubRange(0).Address;
                 result = new BufferCacheEntry(address, gpuVa, GetBuffer(address, size));
 
                 _dirtyCache[gpuVa] = result;
@@ -184,7 +466,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
                 result.EndGpuAddress < alignedEndGpuVa ||
                 result.UnmappedSequence != result.Buffer.UnmappedSequence)
             {
-                ulong address = TranslateAndCreateBuffer(memoryManager, alignedGpuVa, size);
+                MultiRange range = TranslateAndCreateBuffer(memoryManager, alignedGpuVa, size);
+                ulong address = range.GetSubRange(0).Address;
                 result = new BufferCacheEntry(address, alignedGpuVa, GetBuffer(address, size));
 
                 _modifiedCache[alignedGpuVa] = result;
@@ -204,7 +487,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// <param name="size">Size in bytes of the buffer</param>
         private void CreateBufferAligned(ulong address, ulong size)
         {
-            int overlapsCount = _buffers.FindOverlapsNonOverlapping(address, size, ref _bufferOverlaps);
+            Buffer[] overlaps = _bufferOverlaps;
+            int overlapsCount = _buffers.FindOverlapsNonOverlapping(address, size, ref overlaps);
 
             if (overlapsCount != 0)
             {
@@ -215,9 +499,12 @@ namespace Ryujinx.Graphics.Gpu.Memory
                 // old buffer(s) to the new buffer.
 
                 ulong endAddress = address + size;
+                Buffer overlap0 = overlaps[0];
 
-                if (_bufferOverlaps[0].Address > address || _bufferOverlaps[0].EndAddress < endAddress)
+                if (overlap0.Address > address || overlap0.EndAddress < endAddress)
                 {
+                    bool anySparseCompatible = false;
+
                     // Check if the following conditions are met:
                     // - We have a single overlap.
                     // - The overlap starts at or before the requested range. That is, the overlap happens at the end.
@@ -228,23 +515,25 @@ namespace Ryujinx.Graphics.Gpu.Memory
                     // Allowing for 2 pages (rather than just one) is necessary to catch cases where the
                     // range crosses a page, and after alignment, ends having a size of 2 pages.
                     if (overlapsCount == 1 &&
-                        address >= _bufferOverlaps[0].Address &&
-                        endAddress - _bufferOverlaps[0].EndAddress <= BufferAlignmentSize * 2)
+                        address >= overlap0.Address &&
+                        endAddress - overlap0.EndAddress <= BufferAlignmentSize * 2)
                     {
                         // Try to grow the buffer by 1.5x of its current size.
                         // This improves performance in the cases where the buffer is resized often by small amounts.
-                        ulong existingSize = _bufferOverlaps[0].Size;
+                        ulong existingSize = overlap0.Size;
                         ulong growthSize = (existingSize + Math.Min(existingSize >> 1, MaxDynamicGrowthSize)) & ~BufferAlignmentMask;
 
                         size = Math.Max(size, growthSize);
                         endAddress = address + size;
 
-                        overlapsCount = _buffers.FindOverlapsNonOverlapping(address, size, ref _bufferOverlaps);
+                        overlapsCount = _buffers.FindOverlapsNonOverlapping(address, size, ref overlaps);
                     }
 
                     for (int index = 0; index < overlapsCount; index++)
                     {
-                        Buffer buffer = _bufferOverlaps[index];
+                        Buffer buffer = overlaps[index];
+
+                        anySparseCompatible |= buffer.SparseCompatible;
 
                         address = Math.Min(address, buffer.Address);
                         endAddress = Math.Max(endAddress, buffer.EndAddress);
@@ -257,35 +546,13 @@ namespace Ryujinx.Graphics.Gpu.Memory
 
                     ulong newSize = endAddress - address;
 
-                    Buffer newBuffer = new(_context, _physicalMemory, address, newSize, _bufferOverlaps.Take(overlapsCount));
-
-                    lock (_buffers)
-                    {
-                        _buffers.Add(newBuffer);
-                    }
-
-                    for (int index = 0; index < overlapsCount; index++)
-                    {
-                        Buffer buffer = _bufferOverlaps[index];
-
-                        int dstOffset = (int)(buffer.Address - newBuffer.Address);
-
-                        buffer.CopyTo(newBuffer, dstOffset);
-                        newBuffer.InheritModifiedRanges(buffer);
-
-                        buffer.DecrementReferenceCount();
-                    }
-
-                    newBuffer.SynchronizeMemory(address, newSize);
-
-                    // Existing buffers were modified, we need to rebind everything.
-                    NotifyBuffersModified?.Invoke();
+                    CreateBufferAligned(address, newSize, anySparseCompatible, overlaps, overlapsCount);
                 }
             }
             else
             {
                 // No overlap, just create a new buffer.
-                Buffer buffer = new(_context, _physicalMemory, address, size);
+                Buffer buffer = new(_context, _physicalMemory, address, size, sparseCompatible: false);
 
                 lock (_buffers)
                 {
@@ -294,6 +561,151 @@ namespace Ryujinx.Graphics.Gpu.Memory
             }
 
             ShrinkOverlapsBufferIfNeeded();
+        }
+
+        /// <summary>
+        /// Creates a new buffer for the specified range, if needed.
+        /// If a buffer where this range can be fully contained already exists,
+        /// then the creation of a new buffer is not necessary.
+        /// </summary>
+        /// <param name="address">Address of the buffer in guest memory</param>
+        /// <param name="size">Size in bytes of the buffer</param>
+        /// <param name="alignment">Alignment of the start address of the buffer</param>
+        private void CreateBufferAligned(ulong address, ulong size, ulong alignment)
+        {
+            Buffer[] overlaps = _bufferOverlaps;
+            int overlapsCount = _buffers.FindOverlapsNonOverlapping(address, size, ref overlaps);
+            bool sparseAligned = alignment >= SparseBufferAlignmentSize;
+
+            if (overlapsCount != 0)
+            {
+                // If the buffer already exists, make sure if covers the entire range,
+                // and make sure it is properly aligned, otherwise sparse mapping may fail.
+
+                ulong endAddress = address + size;
+                Buffer overlap0 = overlaps[0];
+
+                if (overlap0.Address > address ||
+                    overlap0.EndAddress < endAddress ||
+                    (overlap0.Address & (alignment - 1)) != 0 ||
+                    (!overlap0.SparseCompatible && sparseAligned))
+                {
+                    // We need to make sure the new buffer is properly aligned.
+                    // However, after the range is aligned, it is possible that it
+                    // overlaps more buffers, so try again after each extension
+                    // and ensure we cover all overlaps.
+
+                    int oldOverlapsCount;
+
+                    do
+                    {
+                        for (int index = 0; index < overlapsCount; index++)
+                        {
+                            Buffer buffer = overlaps[index];
+
+                            address = Math.Min(address, buffer.Address);
+                            endAddress = Math.Max(endAddress, buffer.EndAddress);
+                        }
+
+                        address &= ~(alignment - 1);
+
+                        oldOverlapsCount = overlapsCount;
+                        overlapsCount = _buffers.FindOverlapsNonOverlapping(address, endAddress - address, ref overlaps);
+                    }
+                    while (oldOverlapsCount != overlapsCount);
+
+                    lock (_buffers)
+                    {
+                        for (int index = 0; index < overlapsCount; index++)
+                        {
+                            _buffers.Remove(overlaps[index]);
+                        }
+                    }
+
+                    ulong newSize = endAddress - address;
+
+                    CreateBufferAligned(address, newSize, sparseAligned, overlaps, overlapsCount);
+                }
+            }
+            else
+            {
+                // No overlap, just create a new buffer.
+                Buffer buffer = new(_context, _physicalMemory, address, size, sparseAligned);
+
+                lock (_buffers)
+                {
+                    _buffers.Add(buffer);
+                }
+            }
+
+            ShrinkOverlapsBufferIfNeeded();
+        }
+
+        /// <summary>
+        /// Creates a new buffer for the specified range, if needed.
+        /// If a buffer where this range can be fully contained already exists,
+        /// then the creation of a new buffer is not necessary.
+        /// </summary>
+        /// <param name="address">Address of the buffer in guest memory</param>
+        /// <param name="size">Size in bytes of the buffer</param>
+        /// <param name="sparseCompatible">Indicates if the buffer can be used in a sparse buffer mapping</param>
+        /// <param name="overlaps">Buffers overlapping the range</param>
+        /// <param name="overlapsCount">Total of overlaps</param>
+        private void CreateBufferAligned(ulong address, ulong size, bool sparseCompatible, Buffer[] overlaps, int overlapsCount)
+        {
+            Buffer newBuffer = new Buffer(_context, _physicalMemory, address, size, sparseCompatible, overlaps.Take(overlapsCount));
+
+            lock (_buffers)
+            {
+                _buffers.Add(newBuffer);
+            }
+
+            for (int index = 0; index < overlapsCount; index++)
+            {
+                Buffer buffer = overlaps[index];
+
+                int dstOffset = (int)(buffer.Address - newBuffer.Address);
+
+                buffer.CopyTo(newBuffer, dstOffset);
+                newBuffer.InheritModifiedRanges(buffer);
+
+                buffer.DecrementReferenceCount();
+            }
+
+            newBuffer.SynchronizeMemory(address, size);
+
+            // Existing buffers were modified, we need to rebind everything.
+            NotifyBuffersModified?.Invoke();
+
+            RecreateMultiRangeBuffers(address, size);
+        }
+
+        /// <summary>
+        /// Recreates all the multi-range buffers that overlaps a given physical memory range.
+        /// </summary>
+        /// <param name="address">Start address of the range</param>
+        /// <param name="size">Size of the range in bytes</param>
+        private void RecreateMultiRangeBuffers(ulong address, ulong size)
+        {
+            if ((address & (SparseBufferAlignmentSize - 1)) != 0 || (size & (SparseBufferAlignmentSize - 1)) != 0)
+            {
+                return;
+            }
+
+            MultiRangeBuffer[] overlaps = new MultiRangeBuffer[10];
+
+            int overlapCount = _multiRangeBuffers.FindOverlaps(address, size, ref overlaps);
+
+            for (int index = 0; index < overlapCount; index++)
+            {
+                _multiRangeBuffers.Remove(overlaps[index]);
+                overlaps[index].Dispose();
+            }
+
+            for (int index = 0; index < overlapCount; index++)
+            {
+                CreateMultiRangeBuffer(overlaps[index].Range);
+            }
         }
 
         /// <summary>
@@ -319,9 +731,63 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// <param name="size">Size in bytes of the copy</param>
         public void CopyBuffer(MemoryManager memoryManager, ulong srcVa, ulong dstVa, ulong size)
         {
-            ulong srcAddress = TranslateAndCreateBuffer(memoryManager, srcVa, size);
-            ulong dstAddress = TranslateAndCreateBuffer(memoryManager, dstVa, size);
+            MultiRange srcRange = TranslateAndCreateMultiBuffersPhysicalOnly(memoryManager, srcVa, size);
+            MultiRange dstRange = TranslateAndCreateMultiBuffersPhysicalOnly(memoryManager, dstVa, size);
 
+            if (srcRange.Count == 1 && dstRange.Count == 1)
+            {
+                CopyBufferSingleRange(memoryManager, srcRange.GetSubRange(0).Address, dstRange.GetSubRange(0).Address, size);
+            }
+            else
+            {
+                ulong copiedSize = 0;
+                ulong srcOffset = 0;
+                ulong dstOffset = 0;
+                int srcRangeIndex = 0;
+                int dstRangeIndex = 0;
+
+                while (copiedSize < size)
+                {
+                    if (srcRange.GetSubRange(srcRangeIndex).Size == srcOffset)
+                    {
+                        srcRangeIndex++;
+                        srcOffset = 0;
+                    }
+
+                    if (dstRange.GetSubRange(dstRangeIndex).Size == dstOffset)
+                    {
+                        dstRangeIndex++;
+                        dstOffset = 0;
+                    }
+
+                    MemoryRange srcSubRange = srcRange.GetSubRange(srcRangeIndex);
+                    MemoryRange dstSubRange = dstRange.GetSubRange(dstRangeIndex);
+
+                    ulong srcSize = srcSubRange.Size - srcOffset;
+                    ulong dstSize = dstSubRange.Size - dstOffset;
+                    ulong copySize = Math.Min(srcSize, dstSize);
+
+                    CopyBufferSingleRange(memoryManager, srcSubRange.Address + srcOffset, dstSubRange.Address + dstOffset, copySize);
+
+                    srcOffset += copySize;
+                    dstOffset += copySize;
+                    copiedSize += copySize;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Copy a buffer data from a given address to another.
+        /// </summary>
+        /// <remarks>
+        /// This does a GPU side copy.
+        /// </remarks>
+        /// <param name="memoryManager">GPU memory manager where the buffer is mapped</param>
+        /// <param name="srcAddress">Physical address of the copy source</param>
+        /// <param name="dstAddress">Physical address of the copy destination</param>
+        /// <param name="size">Size in bytes of the copy</param>
+        private void CopyBufferSingleRange(MemoryManager memoryManager, ulong srcAddress, ulong dstAddress, ulong size)
+        {
             Buffer srcBuffer = GetBuffer(srcAddress, size);
             Buffer dstBuffer = GetBuffer(dstAddress, size);
 
@@ -346,6 +812,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
                 dstBuffer.ClearModified(dstAddress, size);
                 memoryManager.Physical.WriteTrackedResource(dstAddress, memoryManager.Physical.GetSpan(srcAddress, (int)size), ResourceKind.Buffer);
             }
+
+            dstBuffer.CopyToDependantVirtualBuffers(dstAddress, size);
         }
 
         /// <summary>
@@ -360,39 +828,105 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// <param name="value">Value to be written into the buffer</param>
         public void ClearBuffer(MemoryManager memoryManager, ulong gpuVa, ulong size, uint value)
         {
-            ulong address = TranslateAndCreateBuffer(memoryManager, gpuVa, size);
+            MultiRange range = TranslateAndCreateMultiBuffersPhysicalOnly(memoryManager, gpuVa, size);
 
-            Buffer buffer = GetBuffer(address, size);
+            for (int index = 0; index < range.Count; index++)
+            {
+                MemoryRange subRange = range.GetSubRange(index);
+                Buffer buffer = GetBuffer(subRange.Address, subRange.Size);
 
-            int offset = (int)(address - buffer.Address);
+                int offset = (int)(subRange.Address - buffer.Address);
 
-            _context.Renderer.Pipeline.ClearBuffer(buffer.Handle, offset, (int)size, value);
+                _context.Renderer.Pipeline.ClearBuffer(buffer.Handle, offset, (int)subRange.Size, value);
 
-            memoryManager.Physical.FillTrackedResource(address, size, value, ResourceKind.Buffer);
+                memoryManager.Physical.FillTrackedResource(subRange.Address, subRange.Size, value, ResourceKind.Buffer);
+
+                buffer.CopyToDependantVirtualBuffers(subRange.Address, subRange.Size);
+            }
         }
 
         /// <summary>
-        /// Gets a buffer sub-range from a start address til a page boundary after the given size.
+        /// Gets a buffer sub-range starting at a given memory address, aligned to the next page boundary.
         /// </summary>
-        /// <param name="address">Start address of the memory range</param>
-        /// <param name="size">Size in bytes of the memory range</param>
+        /// <param name="range">Physical regions of memory where the buffer is mapped</param>
         /// <param name="write">Whether the buffer will be written to by this use</param>
         /// <returns>The buffer sub-range starting at the given memory address</returns>
-        public BufferRange GetBufferRangeAligned(ulong address, ulong size, bool write = false)
+        public BufferRange GetBufferRangeAligned(MultiRange range, bool write = false)
         {
-            return GetBuffer(address, size, write).GetRangeAligned(address, size, write);
+            if (range.Count > 1)
+            {
+                return GetBuffer(range, write).GetRange(range);
+            }
+            else
+            {
+                MemoryRange subRange = range.GetSubRange(0);
+                return GetBuffer(subRange.Address, subRange.Size, write).GetRangeAligned(subRange.Address, subRange.Size, write);
+            }
         }
 
         /// <summary>
         /// Gets a buffer sub-range for a given memory range.
         /// </summary>
-        /// <param name="address">Start address of the memory range</param>
-        /// <param name="size">Size in bytes of the memory range</param>
+        /// <param name="range">Physical regions of memory where the buffer is mapped</param>
         /// <param name="write">Whether the buffer will be written to by this use</param>
         /// <returns>The buffer sub-range for the given range</returns>
-        public BufferRange GetBufferRange(ulong address, ulong size, bool write = false)
+        public BufferRange GetBufferRange(MultiRange range, bool write = false)
         {
-            return GetBuffer(address, size, write).GetRange(address, size, write);
+            if (range.Count > 1)
+            {
+                return GetBuffer(range, write).GetRange(range);
+            }
+            else
+            {
+                MemoryRange subRange = range.GetSubRange(0);
+                return GetBuffer(subRange.Address, subRange.Size, write).GetRange(subRange.Address, subRange.Size, write);
+            }
+        }
+
+        /// <summary>
+        /// Gets a buffer for a given memory range.
+        /// A buffer overlapping with the specified range is assumed to already exist on the cache.
+        /// </summary>
+        /// <param name="range">Physical regions of memory where the buffer is mapped</param>
+        /// <param name="write">Whether the buffer will be written to by this use</param>
+        /// <returns>The buffer where the range is fully contained</returns>
+        private MultiRangeBuffer GetBuffer(MultiRange range, bool write = false)
+        {
+            for (int i = 0; i < range.Count; i++)
+            {
+                MemoryRange subRange = range.GetSubRange(i);
+
+                Buffer subBuffer = _buffers.FindFirstOverlap(subRange.Address, subRange.Size);
+
+                subBuffer.SynchronizeMemory(subRange.Address, subRange.Size);
+
+                if (write)
+                {
+                    subBuffer.SignalModified(subRange.Address, subRange.Size);
+                }
+            }
+
+            MultiRangeBuffer[] overlaps = new MultiRangeBuffer[10];
+
+            int overlapCount = _multiRangeBuffers.FindOverlaps(range, ref overlaps);
+
+            MultiRangeBuffer buffer = null;
+
+            for (int i = 0; i < overlapCount; i++)
+            {
+                if (overlaps[i].Range.Contains(range))
+                {
+                    buffer = overlaps[i];
+                    break;
+                }
+            }
+
+            if (write && buffer != null && !_context.Capabilities.SupportsSparseBuffer)
+            {
+                buffer.AddModifiedRegion(range, ++_virtualModifiedSequenceNumber);
+            }
+
+            return buffer;
         }
 
         /// <summary>
@@ -411,6 +945,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
             {
                 buffer = _buffers.FindFirstOverlap(address, size);
 
+                buffer.CopyFromDependantVirtualBuffers();
                 buffer.SynchronizeMemory(address, size);
 
                 if (write)
@@ -429,13 +964,41 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// <summary>
         /// Performs guest to host memory synchronization of a given memory range.
         /// </summary>
+        /// <param name="range">Physical regions of memory where the buffer is mapped</param>
+        public void SynchronizeBufferRange(MultiRange range)
+        {
+            if (range.Count == 1)
+            {
+                MemoryRange subRange = range.GetSubRange(0);
+                SynchronizeBufferRange(subRange.Address, subRange.Size, copyBackVirtual: true);
+            }
+            else
+            {
+                for (int index = 0; index < range.Count; index++)
+                {
+                    MemoryRange subRange = range.GetSubRange(index);
+                    SynchronizeBufferRange(subRange.Address, subRange.Size, copyBackVirtual: false);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Performs guest to host memory synchronization of a given memory range.
+        /// </summary>
         /// <param name="address">Start address of the memory range</param>
         /// <param name="size">Size in bytes of the memory range</param>
-        public void SynchronizeBufferRange(ulong address, ulong size)
+        /// <param name="copyBackVirtual">Whether virtual buffers that uses this buffer as backing memory should have its data copied back if modified</param>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void SynchronizeBufferRange(ulong address, ulong size, bool copyBackVirtual)
         {
             if (size != 0)
             {
                 Buffer buffer = _buffers.FindFirstOverlap(address, size);
+
+                if (copyBackVirtual)
+                {
+                    buffer.CopyFromDependantVirtualBuffers();
+                }
 
                 buffer.SynchronizeMemory(address, size);
             }
@@ -491,7 +1054,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
 
         /// <summary>
         /// Disposes all buffers in the cache.
-        /// It's an error to use the buffer manager after disposal.
+        /// It's an error to use the buffer cache after disposal.
         /// </summary>
         public void Dispose()
         {

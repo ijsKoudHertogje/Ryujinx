@@ -185,6 +185,7 @@ namespace Ryujinx.Graphics.Gpu.Image
             G24R8RUintGUnormBUnormAUnorm     = G24R8             | RUint  | GUnorm | BUnorm | AUnorm,        // 0x24a0e
             Z24S8RUintGUnormBUnormAUnorm     = Z24S8             | RUint  | GUnorm | BUnorm | AUnorm,        // 0x24a29
             Z24S8RUintGUnormBUintAUint       = Z24S8             | RUint  | GUnorm | BUint  | AUint,         // 0x48a29
+            X8Z24RUnormGUintBUintAUint       = X8Z24             | RUnorm | GUint  | BUint  | AUint,         // 0x4912a
             S8Z24RUnormGUintBUintAUint       = S8Z24             | RUnorm | GUint  | BUint  | AUint,         // 0x4912b
             R32B24G8RFloatGUintBUnormAUnorm  = R32B24G8          | RFloat | GUint  | BUnorm | AUnorm,        // 0x25385
             Zf32X24S8RFloatGUintBUnormAUnorm = Zf32X24S8         | RFloat | GUint  | BUnorm | AUnorm,        // 0x253b0
@@ -410,6 +411,7 @@ namespace Ryujinx.Graphics.Gpu.Image
             { TextureFormat.G24R8RUintGUnormBUnormAUnorm,     new FormatInfo(Format.D24UnormS8Uint,    1,  1,  4,  2) },
             { TextureFormat.Z24S8RUintGUnormBUnormAUnorm,     new FormatInfo(Format.D24UnormS8Uint,    1,  1,  4,  2) },
             { TextureFormat.Z24S8RUintGUnormBUintAUint,       new FormatInfo(Format.D24UnormS8Uint,    1,  1,  4,  2) },
+            { TextureFormat.X8Z24RUnormGUintBUintAUint,       new FormatInfo(Format.X8UintD24Unorm,    1,  1,  4,  2) },
             { TextureFormat.S8Z24RUnormGUintBUintAUint,       new FormatInfo(Format.S8UintD24Unorm,    1,  1,  4,  2) },
             { TextureFormat.R32B24G8RFloatGUintBUnormAUnorm,  new FormatInfo(Format.D32FloatS8Uint,    1,  1,  8,  2) },
             { TextureFormat.Zf32X24S8RFloatGUintBUnormAUnorm, new FormatInfo(Format.D32FloatS8Uint,    1,  1,  8,  2) },
@@ -651,9 +653,35 @@ namespace Ryujinx.Graphics.Gpu.Image
         /// <returns>True if the format is valid, false otherwise</returns>
         public static bool TryGetTextureFormat(uint encoded, bool isSrgb, out FormatInfo format)
         {
-            encoded |= (isSrgb ? 1u << 19 : 0u);
+            bool isPacked = (encoded & 0x80000000u) != 0;
+            if (isPacked)
+            {
+                encoded &= ~0x80000000u;
+            }
 
-            return _textureFormats.TryGetValue((TextureFormat)encoded, out format);
+            encoded |= isSrgb ? 1u << 19 : 0u;
+
+            bool found = _textureFormats.TryGetValue((TextureFormat)encoded, out format);
+
+            if (found && isPacked && !format.Format.IsDepthOrStencil())
+            {
+                // If the packed flag is set, then the components of the pixel are tightly packed into the
+                // GPU registers on the shader.
+                // We can get the same behaviour by aliasing the texture as a format with the same amount of
+                // bytes per pixel, but only a single or the lowest possible number of components.
+
+                format = format.BytesPerPixel switch
+                {
+                    1 => new FormatInfo(Format.R8Unorm, 1, 1, 1, 1),
+                    2 => new FormatInfo(Format.R16Unorm, 1, 1, 2, 1),
+                    4 => new FormatInfo(Format.R32Uint, 1, 1, 4, 1),
+                    8 => new FormatInfo(Format.R32G32Uint, 1, 1, 8, 2),
+                    16 => new FormatInfo(Format.R32G32B32A32Uint, 1, 1, 16, 4),
+                    _ => format,
+                };
+            }
+
+            return found;
         }
 
         /// <summary>

@@ -1,4 +1,4 @@
-﻿using Ryujinx.Horizon.Sdk.Sf.Hipc;
+using Ryujinx.Horizon.Sdk.Sf.Hipc;
 using Ryujinx.Horizon.Sdk.Sm;
 using Ryujinx.Horizon.Wlan.Ipc;
 
@@ -54,6 +54,7 @@ namespace Ryujinx.Horizon.Wlan
         public void Shutdown()
         {
             _serverManager.Dispose();
+            _sm.Dispose();
         }
     }
 }

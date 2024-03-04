@@ -1,4 +1,4 @@
-﻿using Ryujinx.Common.Configuration;
+using Ryujinx.Common.Configuration;
 using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
 using Silk.NET.Vulkan;
@@ -484,20 +484,6 @@ namespace Ryujinx.Graphics.Vulkan
                 };
 
                 pExtendedFeatures = &featuresFragmentShaderInterlock;
-            }
-
-            PhysicalDeviceSubgroupSizeControlFeaturesEXT featuresSubgroupSizeControl;
-
-            if (physicalDevice.IsDeviceExtensionPresent("VK_EXT_subgroup_size_control"))
-            {
-                featuresSubgroupSizeControl = new PhysicalDeviceSubgroupSizeControlFeaturesEXT
-                {
-                    SType = StructureType.PhysicalDeviceSubgroupSizeControlFeaturesExt,
-                    PNext = pExtendedFeatures,
-                    SubgroupSizeControl = true,
-                };
-
-                pExtendedFeatures = &featuresSubgroupSizeControl;
             }
 
             PhysicalDeviceCustomBorderColorFeaturesEXT featuresCustomBorderColor;

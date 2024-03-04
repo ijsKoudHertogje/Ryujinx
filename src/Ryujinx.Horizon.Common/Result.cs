@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 
 namespace Ryujinx.Horizon.Common
 {
@@ -34,6 +34,11 @@ namespace Ryujinx.Horizon.Common
             }
 
             ErrorCode = module | (description << ModuleBits);
+        }
+
+        public Result(int errorCode)
+        {
+            ErrorCode = errorCode;
         }
 
         public readonly override bool Equals(object obj)

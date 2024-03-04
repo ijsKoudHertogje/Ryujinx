@@ -1,4 +1,4 @@
-﻿using Ryujinx.Horizon.MmNv.Ipc;
+using Ryujinx.Horizon.MmNv.Ipc;
 using Ryujinx.Horizon.Sdk.Sf.Hipc;
 using Ryujinx.Horizon.Sdk.Sm;
 
@@ -38,6 +38,7 @@ namespace Ryujinx.Horizon.MmNv
         public void Shutdown()
         {
             _serverManager.Dispose();
+            _sm.Dispose();
         }
     }
 }

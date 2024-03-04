@@ -1,8 +1,8 @@
-﻿using Ryujinx.HLE.Ui;
+using Ryujinx.HLE.UI;
 
 namespace Ryujinx.Headless.SDL2
 {
-    internal class HeadlessHostUiTheme : IHostUiTheme
+    internal class HeadlessHostUiTheme : IHostUITheme
     {
         public string FontFamily => "sans-serif";
 
